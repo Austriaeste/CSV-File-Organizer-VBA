@@ -1,0 +1,349 @@
+'----------------------------------------------------------------------------------
+' モジュール名: Module1
+' 概要: バッチファイルの機能をVBAで再現し、CSVファイルを日付に基づき整理する
+' エラー76対策: フォルダの階層作成を安全に行う CreateFolderRecursive 関数を導入
+'----------------------------------------------------------------------------------
+
+Option Explicit
+
+' パス設定
+Const SOURCE_FOLDER_NAME As String = "収集ファイル"
+Const TEMP_BASE_FOLDER_NAME As String = "収集一時格納"
+Const FINAL_TARGET_FOLDER_NAME As String = "収集データ" ' OneDrive\デスクトップ配下を想定
+
+'----------------------------------------------------------------------------------
+' メイン処理: 収集データ整理を実行するマクロ
+'----------------------------------------------------------------------------------
+Sub OrganizeCollectedData()
+    Dim fso As Object ' FileSystemObject
+    Dim sourcePath As String
+    Dim tempBasePath As String
+    Dim finalTargetPath As String
+    Dim file As Object
+    Dim fileName As String
+    Dim parts() As String
+    Dim startDateStr As String
+    Dim targetYear As String
+    Dim targetMonthDay As String
+    Dim periodFolder As String
+    Dim twoDayFolder As String
+    Dim localTargetFolder As String
+    Dim fileCount As Long
+    Dim msg As String
+    Dim userProfile As String
+    Dim oneDrivePath As String
+
+    ' エラーハンドリングの開始
+    On Error GoTo ErrorHandler
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    ' 環境変数をVBAで取得
+    userProfile = Environ("USERPROFILE")
+    ' OneDriveパスは通常、ユーザープロファイル配下にあるが、環境により異なる場合がある
+    ' ユーザーの実際のOneDriveパスに合わせてここを調整する必要がある可能性があります。
+    ' 例: oneDrivePath = "C:\Users\austr\OneDrive - Personal"
+    oneDrivePath = userProfile & "\OneDrive" ' OneDriveの標準パスを仮定
+
+    ' パスの組み立て
+    sourcePath = userProfile & "\Downloads\" & SOURCE_FOLDER_NAME
+    finalTargetPath = oneDrivePath & "\デスクトップ\" & FINAL_TARGET_FOLDER_NAME
+    tempBasePath = userProfile & "\Downloads\" & TEMP_BASE_FOLDER_NAME ' 一時フォルダはDownloads直下
+
+    ' 処理開始メッセージ
+    msg = "処理を開始します..." & vbCrLf & vbCrLf & _
+          "ソースフォルダ: " & sourcePath & vbCrLf & _
+          "最終格納先: " & finalTargetPath
+    MsgBox msg, vbInformation, "処理開始"
+
+    ' 前提条件の確認: ソースフォルダの存在チェック
+    If Not fso.FolderExists(sourcePath) Then
+        msg = "エラー: ソースフォルダが存在しません。" & vbCrLf & sourcePath
+        MsgBox msg, vbCritical, "エラー"
+        Exit Sub
+    End If
+
+    ' 一時格納フォルダの初期化と作成（安全な作成関数を使用）
+    If fso.FolderExists(tempBasePath) Then
+        fso.DeleteFolder tempBasePath, True ' 強制的に削除
+    End If
+    If Not CreateFolderRecursive(tempBasePath) Then ' ここで安全な作成関数を呼び出す
+        msg = "エラー: 一時フォルダの作成に失敗しました: " & tempBasePath
+        MsgBox msg, vbCritical, "エラー"
+        Exit Sub
+    End If
+
+    ' ファイル数の確認
+    fileCount = 0
+    If fso.FolderExists(sourcePath) Then
+        For Each file In fso.GetFolder(sourcePath).Files
+            If LCase(fso.GetExtensionName(file.Name)) = "csv" Then
+                fileCount = fileCount + 1
+            End If
+        Next file
+    End If
+
+    If fileCount = 0 Then
+        MsgBox "警告: 処理対象のCSVファイルが見つかりません。", vbExclamation, "警告"
+        GoTo Cleanup
+    End If
+    MsgBox "処理対象ファイル数: " & fileCount, vbInformation, "ファイル数確認"
+
+    ' CSVファイルをループ処理
+    For Each file In fso.GetFolder(sourcePath).Files
+        If LCase(fso.GetExtensionName(file.Name)) = "csv" Then
+            fileName = file.Name
+            Debug.Print "処理中: " & fileName
+
+            ' ファイル名からデータ抽出（例: 2025050900_2025051023_XXX.csv）
+            parts = Split(fileName, "_")
+
+            If UBound(parts) >= 1 Then ' 少なくとも2つのアンダースコアで区切られているか
+                startDateStr = parts(0) ' 例: 2025050900
+
+                ' 開始日時の形式チェック（YYYYMMDDHH形式、10桁）
+                If Len(startDateStr) = 10 And IsNumeric(startDateStr) Then
+                    targetYear = Left(startDateStr, 4)
+                    targetMonthDay = Mid(startDateStr, 5, 4) ' YYYYMMDDHHのMMDD部分
+
+                    ' 期間フォルダの判定
+                    periodFolder = DeterminePeriodFolder(targetYear, targetMonthDay)
+                    If periodFolder = "" Then
+                        Debug.Print "エラー: 期間フォルダを判定できません: " & fileName
+                        GoTo NextFile
+                    End If
+
+                    ' 2日ごとのフォルダの判定
+                    twoDayFolder = DetermineTwoDayFolder(targetYear, Mid(startDateStr, 5, 2), Mid(startDateStr, 7, 2)) ' YYYY, MM, DD
+                    If twoDayFolder = "" Then
+                        Debug.Print "エラー: 2日ごとのフォルダを判定できません: " & fileName
+                        GoTo NextFile
+                    End If
+
+                    ' 格納先パスの構築とフォルダ作成（安全な作成関数を使用）
+                    localTargetFolder = tempBasePath & "\" & targetYear & "年度\" & periodFolder & "\" & twoDayFolder
+                    If Not CreateFolderRecursive(localTargetFolder) Then ' ここで安全な作成関数を呼び出す
+                        Debug.Print "エラー: ローカルターゲットフォルダの作成に失敗しました: " & localTargetFolder
+                        GoTo NextFile
+                    End If
+
+                    ' ファイルコピー
+                    fso.CopyFile file.Path, localTargetFolder & "\" & fileName, True ' 上書き許可
+                    Debug.Print "格納完了: " & localTargetFolder & "\" & fileName
+                Else
+                    Debug.Print "エラー: ファイル名の形式が不正です (日時部分): " & fileName
+                End If
+            Else
+                Debug.Print "エラー: ファイル名の形式が不正です (アンダースコア不足): " & fileName
+            End If
+NextFile:
+        End If
+    Next file
+
+    ' 最後にまとめて一時格納フォルダから本番へコピー
+    MsgBox "一時フォルダから本番へ一括コピー中...", vbInformation, "最終コピー"
+
+    ' 最終格納先の確認と作成（安全な作成関数を使用）
+    If Not CreateFolderRecursive(finalTargetPath) Then ' ここで安全な作成関数を呼び出す
+        msg = "エラー: 最終格納先の作成に失敗しました: " & finalTargetPath
+        MsgBox msg, vbCritical, "エラー"
+        GoTo ErrorHandler ' 作成失敗は致命的なのでエラーハンドラへ
+    End If
+
+    ' RecursiveCopyFolder を呼び出して一時フォルダの内容を最終格納先にコピー
+    ' robocopyの代替として再帰コピーを使用
+    Call RecursiveCopyFolder(fso.GetFolder(tempBasePath), finalTargetPath)
+
+    MsgBox "コピー完了", vbInformation, "コピー完了"
+
+Cleanup:
+    ' 一時フォルダ削除
+    MsgBox "一時フォルダを削除中: " & tempBasePath, vbInformation, "クリーンアップ"
+    If fso.FolderExists(tempBasePath) Then
+        fso.DeleteFolder tempBasePath, True
+    End If
+    MsgBox "削除完了", vbInformation, "クリーンアップ完了"
+
+    MsgBox "処理が正常に完了しました。", vbInformation, "完了"
+    Set fso = Nothing
+    Exit Sub
+
+ErrorHandler:
+    msg = "処理中にエラーが発生しました。" & vbCrLf & _
+          "エラー番号: " & Err.Number & vbCrLf & _
+          "エラー内容: " & Err.Description
+    MsgBox msg, vbCritical, "エラー"
+    Set fso = Nothing
+End Sub
+
+'----------------------------------------------------------------------------------
+' ヘルパー関数: 期間フォルダの判定（10日間）
+' 説明: 日付文字列から日付を抽出し、該当する10日間の期間フォルダ名を返す
+'----------------------------------------------------------------------------------
+Private Function DeterminePeriodFolder(ByVal yearStr As String, ByVal mmddStr As String) As String
+    Dim targetDate As Date
+    Dim periodStart As Date
+    Dim periodEnd As Date
+    Dim i As Long
+
+    On Error Resume Next ' 日付変換エラーを捕捉
+
+    ' 日付文字列からDate型に変換 (YYYYMMDD形式をYYYY/MM/DDに変換)
+    targetDate = CDate(Left(yearStr, 4) & "/" & Mid(mmddStr, 1, 2) & "/" & Mid(mmddStr, 3, 2))
+
+    If Err.Number <> 0 Then
+        DeterminePeriodFolder = "" ' 不正な日付
+        Err.Clear
+        Exit Function
+    End If
+    On Error GoTo 0 ' エラーハンドリングを元に戻す
+
+    ' 各期間を判定
+    ' 1日～10日、11日～20日、21日～月末日の3区分
+    For i = 1 To 31 Step 10
+        periodStart = DateSerial(CInt(yearStr), Month(targetDate), i)
+        If i = 1 Then ' 1-10日
+            periodEnd = DateSerial(CInt(yearStr), Month(targetDate), 10)
+        ElseIf i = 11 Then ' 11-20日
+            periodEnd = DateSerial(CInt(yearStr), Month(targetDate), 20)
+        Else ' 21日以降
+            periodEnd = DateSerial(CInt(yearStr), Month(targetDate) + 1, 0) ' 翌月0日は月末日
+        End If
+
+        If targetDate >= periodStart And targetDate <= periodEnd Then
+            DeterminePeriodFolder = yearStr & "-" & Format(periodStart, "mmdd") & "-" & Format(periodEnd, "mmdd")
+            Exit Function
+        End If
+    Next i
+
+    DeterminePeriodFolder = "" ' 該当する期間が見つからない場合
+End Function
+
+'----------------------------------------------------------------------------------
+' ヘルパー関数: 2日ごとのフォルダの判定
+' 説明: 日付に基づき、2日ごとのフォルダ名を返す（例: 0501_0502_収集ファイル）
+'----------------------------------------------------------------------------------
+Private Function DetermineTwoDayFolder(ByVal yearStr As String, ByVal monthStr As String, ByVal dayStr As String) As String
+    Dim targetDate As Date
+    Dim rangeStartDay As Long
+    Dim rangeEndDay As Long
+    Dim dayNum As Long
+
+    On Error Resume Next ' 日付変換エラーを捕捉
+
+    targetDate = CDate(yearStr & "/" & monthStr & "/" & dayStr)
+
+    If Err.Number <> 0 Then
+        DetermineTwoDayFolder = "" ' 不正な日付
+        Err.Clear
+        Exit Function
+    End If
+    On Error GoTo 0 ' エラーハンドリングを元に戻す
+
+    dayNum = Day(targetDate)
+
+    ' 元のバッチファイルのロジックに合わせて2日ごとの範囲を計算
+    ' 例: 1日 -> 1-2日, 2日 -> 1-2日, 3日 -> 3-4日
+    rangeStartDay = Int((dayNum - 1) / 2) * 2 + 1
+    rangeEndDay = rangeStartDay + 1
+
+    ' フォルダ名を設定
+    DetermineTwoDayFolder = Format(targetDate, "mm") & Format(rangeStartDay, "00") & "_" & _
+                            Format(targetDate, "mm") & Format(rangeEndDay, "00") & "_" & SOURCE_FOLDER_NAME ' SOURCE_FOLDER_NAMEはConstで定義されている
+End Function
+
+'----------------------------------------------------------------------------------
+' ヘルパーサブルーチン: フォルダを再帰的にコピーする（robocopyの代替）
+' 説明: 指定されたソースフォルダの内容（ファイルとサブフォルダ）を
+'       再帰的に目的のパスにコピーする。
+'----------------------------------------------------------------------------------
+Private Sub RecursiveCopyFolder(ByVal sourceFolder As Object, ByVal destinationPath As String)
+    Dim fso As Object
+    Dim subFolder As Object
+    Dim file As Object
+    Dim currentDestPath As String
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    ' 現在のsourceFolder内のファイルをコピー
+    For Each file In sourceFolder.Files
+        On Error Resume Next ' コピーエラーをスキップし次のファイルへ
+        fso.CopyFile file.Path, destinationPath & "\" & file.Name, True ' 上書き許可
+        If Err.Number <> 0 Then
+            Debug.Print "コピーエラー: " & file.Path & " to " & destinationPath & "\" & file.Name & " - " & Err.Description
+            Err.Clear
+        End If
+        On Error GoTo 0
+    Next file
+
+    ' サブフォルダを再帰的に処理
+    For Each subFolder In sourceFolder.SubFolders
+        currentDestPath = destinationPath & "\" & subFolder.Name
+        ' ターゲットパスにサブフォルダが存在しない場合は作成（RecursiveCopyFolderが作成を試みるので不要だが念のため）
+        If Not fso.FolderExists(currentDestPath) Then
+             fso.CreateFolder currentDestPath ' ここはCreateFolderRecursiveを使わずとも良い。階層が深くないため。
+        End If
+        Call RecursiveCopyFolder(subFolder, currentDestPath) ' 再帰呼び出し
+    Next subFolder
+End Sub
+
+'----------------------------------------------------------------------------------
+' ヘルパー関数: フォルダを階層的に作成する（中間ディレクトリも自動作成）
+' 説明: 指定されたパスに存在する全てのフォルダを、親フォルダも含めて作成する。
+'       既に存在する場合は何もしない。成功すればTrue、失敗すればFalseを返す。
+'----------------------------------------------------------------------------------
+Function CreateFolderRecursive(ByVal folderPath As String) As Boolean
+    Dim fso As Object
+    Dim currentPath As String
+    Dim parts As Variant
+    Dim i As Long
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    CreateFolderRecursive = False ' デフォルトは失敗
+
+    If fso.FolderExists(folderPath) Then
+        CreateFolderRecursive = True ' 既に存在すればOK
+        Exit Function
+    End If
+
+    ' パスを分解して、順に作成を試みる
+    parts = Split(folderPath, "\")
+
+    ' ドライブレターまたはUNCパスの開始部分をセット
+    If InStr(folderPath, ":\") > 0 Then ' 例: C:\
+        currentPath = Left(folderPath, InStr(folderPath, ":\"))
+        i = 1 ' 処理開始インデックス
+    ElseIf Left(folderPath, 2) = "\\" Then ' UNCパスの場合 (例: \\Server\Share\)
+        currentPath = parts(0) & "\" & parts(1) ' \\Server\Share
+        i = 2 ' 処理開始インデックス
+    Else ' その他の相対パスなど (稀に起こりうるが、今回は絶対パスを想定)
+        currentPath = ""
+        i = 0
+    End If
+
+    For i = i To UBound(parts)
+        If currentPath = "" Then ' パスの開始部分が未設定の場合 (例: ドライブレターがない場合)
+            currentPath = parts(i)
+        Else
+            currentPath = currentPath & "\" & parts(i)
+        End If
+
+        ' パスセグメントが空でないことを確認
+        If Len(parts(i)) > 0 Then
+            If Not fso.FolderExists(currentPath) Then
+                On Error Resume Next ' エラーを一時的に無視
+                fso.CreateFolder currentPath
+                If Err.Number <> 0 Then
+                    Debug.Print "フォルダ作成エラー（CreateFolderRecursive）: " & currentPath & " - " & Err.Description
+                    Err.Clear
+                    Exit Function ' 作成に失敗したら終了
+                End If
+                On Error GoTo 0 ' エラーハンドリングを元に戻す
+            End If
+        End If
+    Next i
+
+    ' 最終的にフォルダが作成されたか確認
+    CreateFolderRecursive = fso.FolderExists(folderPath)
+End Function
+
