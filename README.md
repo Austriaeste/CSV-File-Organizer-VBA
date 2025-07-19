@@ -73,6 +73,3 @@ The final structure under the target folder looks like:
 
 ## Contributing
 Feel free to fork this repository, submit issues, or create pull requests for improvements. Suggestions for optimizing folder creation, error handling, or extending functionality are welcome!
-
-## License
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
